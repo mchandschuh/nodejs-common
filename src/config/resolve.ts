@@ -1,8 +1,19 @@
-import { lstat, readdir, realpath } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { ConfigError } from './errors.js';
-import type { ConfigResolution, ConfigResolutionOptions, ConfigRoot, ConfigSource, ResolvedConfigFile } from './types.js';
+import type {
+  ConfigJsonOptions,
+  ConfigResolution,
+  ConfigResolutionOptions,
+  ConfigRoot,
+  ConfigSource,
+  JsonObject,
+  JsonValue,
+  ResolvedConfigFile,
+  ResolvedConfigJson,
+  ResolvedConfigJsonLayer,
+} from './types.js';
 
 const DEFAULT_ENVIRONMENT_VARIABLE = 'SDLC_CONFIG';
 const APP_SLUG = /^[a-z0-9][a-z0-9-]*$/u;
@@ -116,6 +127,75 @@ export async function resolveConfigFile(relativePath: string, options: ConfigRes
     if (result) return result;
   }
   return undefined;
+}
+
+function isJsonObject(value: JsonValue | unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function defineJsonProperty(target: Record<string, JsonValue>, key: string, value: JsonValue): void {
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+}
+
+function cloneJsonValue(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map((entry) => cloneJsonValue(entry));
+  if (!isJsonObject(value)) return value;
+  const result: Record<string, JsonValue> = {};
+  for (const key of Object.keys(value)) defineJsonProperty(result, key, cloneJsonValue(value[key]));
+  return result;
+}
+
+function mergeJsonObjects(base: JsonObject, overlay: JsonObject): JsonObject {
+  const result = cloneJsonValue(base) as JsonObject;
+  const target = result as Record<string, JsonValue>;
+  for (const key of Object.keys(overlay)) {
+    const current = result[key];
+    const next = overlay[key];
+    defineJsonProperty(target, key, isJsonObject(current) && isJsonObject(next) ? mergeJsonObjects(current, next) : cloneJsonValue(next));
+  }
+  return result;
+}
+
+async function readJsonLayer(file: ResolvedConfigFile): Promise<JsonObject> {
+  let text: string;
+  try {
+    text = await readFile(file.absolutePath, 'utf8');
+  } catch {
+    throw new ConfigError('CONFIGURATION_FILE_INVALID', 'Configuration JSON file could not be read.', file.relativePath);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    throw new ConfigError('CONFIGURATION_JSON_INVALID', 'Configuration file does not contain valid JSON.', file.relativePath);
+  }
+  if (!isJsonObject(value)) {
+    throw new ConfigError('CONFIGURATION_JSON_ROOT_INVALID', 'Configuration JSON root must be an object.', file.relativePath);
+  }
+  return value;
+}
+
+export async function resolveConfigJson(options: ConfigJsonOptions): Promise<ResolvedConfigJson> {
+  const relativePath = assertRelativeConfigPath(options.relativePath ?? 'config.json');
+  const roots = await resolveConfigRoots(options);
+  const layers: ResolvedConfigJsonLayer[] = [];
+  let value: JsonObject | undefined;
+  for (const root of roots) {
+    const file = await safeConfigFile(root, relativePath);
+    if (!file) continue;
+    const layer = await readJsonLayer(file);
+    layers.push({ ...file, value: cloneJsonValue(layer) as JsonObject });
+    value = value === undefined ? cloneJsonValue(layer) as JsonObject : mergeJsonObjects(value, layer);
+  }
+  if (!value) {
+    throw new ConfigError('CONFIGURATION_FILE_NOT_FOUND', 'No configuration JSON file was found in the resolved roots.', relativePath);
+  }
+  return { relativePath, value, layers };
 }
 
 async function filesUnder(root: ConfigRoot, directory: string, output: ResolvedConfigFile[]): Promise<void> {

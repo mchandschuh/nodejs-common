@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { ConfigError } from '../src/config/errors.js';
-import { inspectConfig, resolveConfigFile, resolveConfigRoots } from '../src/config/index.js';
+import { inspectConfig, resolveConfigFile, resolveConfigJson, resolveConfigRoots } from '../src/config/index.js';
 
 async function fixture() {
   const root = await mkdtemp('/tmp/nodejs-common-config-');
@@ -52,6 +52,127 @@ test('falls back when higher-precedence roots do not contain a file and preserve
   const result = await resolveConfigFile('defaults.json', value.options);
   assert.equal(result?.source, 'application');
   assert.equal(result?.relativePath, 'defaults.json');
+});
+
+test('layers application, home, and environment JSON objects in precedence order', async () => {
+  const value = await fixture();
+  const application = join(value.root, 'src', '.config');
+  const home = join(value.home, '.example');
+  await mkdir(application, { recursive: true });
+  await mkdir(home, { recursive: true });
+  await writeFile(join(application, 'config.json'), JSON.stringify({
+    llm: { model: 'application-model', thinking: 'medium' },
+    limits: { maxIterations: 3 },
+    labels: ['application'],
+    nullable: 'application',
+  }));
+  await writeFile(join(home, 'config.json'), JSON.stringify({
+    llm: { thinking: 'high' },
+    homeOnly: true,
+    labels: ['home'],
+    nullable: null,
+  }));
+  await writeFile(join(value.environment, 'config.json'), JSON.stringify({
+    llm: { model: 'environment-model' },
+    environmentOnly: true,
+    labels: ['environment'],
+  }));
+
+  const result = await resolveConfigJson(value.options);
+
+  assert.deepEqual(result.value, {
+    llm: { model: 'environment-model', thinking: 'high' },
+    limits: { maxIterations: 3 },
+    labels: ['environment'],
+    nullable: null,
+    homeOnly: true,
+    environmentOnly: true,
+  });
+  assert.deepEqual(result.layers.map((layer) => layer.source), ['application', 'home', 'environment']);
+  assert.deepEqual(result.layers.map((layer) => layer.relativePath), ['config.json', 'config.json', 'config.json']);
+});
+
+test('uses config.json by default and succeeds with only an application layer', async () => {
+  const value = await fixture();
+  const application = join(value.root, 'src', '.config');
+  await mkdir(application, { recursive: true });
+  await writeFile(join(application, 'config.json'), '{"enabled":true}');
+
+  const result = await resolveConfigJson({ ...value.options, environment: {} });
+
+  assert.equal(result.relativePath, 'config.json');
+  assert.deepEqual(result.value, { enabled: true });
+  assert.deepEqual(result.layers.map((layer) => layer.source), ['application']);
+});
+
+test('fails when no JSON configuration layer exists', async () => {
+  const value = await fixture();
+
+  await assert.rejects(
+    () => resolveConfigJson({ ...value.options, environment: {} }),
+    (error: unknown) => error instanceof ConfigError && error.code === 'CONFIGURATION_FILE_NOT_FOUND',
+  );
+});
+
+test('fails closed for malformed and non-object JSON layers', async () => {
+  const malformed = await fixture();
+  const malformedDirectory = join(malformed.root, 'src', '.config');
+  await mkdir(malformedDirectory, { recursive: true });
+  await writeFile(join(malformedDirectory, 'config.json'), '{"valid":');
+  await assert.rejects(
+    () => resolveConfigJson({ ...malformed.options, environment: {} }),
+    (error: unknown) => error instanceof ConfigError && error.code === 'CONFIGURATION_JSON_INVALID',
+  );
+
+  const arrayRoot = await fixture();
+  const arrayDirectory = join(arrayRoot.root, 'src', '.config');
+  await mkdir(arrayDirectory, { recursive: true });
+  await writeFile(join(arrayDirectory, 'config.json'), '["not-an-object"]');
+  await assert.rejects(
+    () => resolveConfigJson({ ...arrayRoot.options, environment: {} }),
+    (error: unknown) => error instanceof ConfigError && error.code === 'CONFIGURATION_JSON_ROOT_INVALID',
+  );
+});
+
+test('does not mask an invalid lower-precedence layer with a valid higher-precedence layer', async () => {
+  const value = await fixture();
+  const application = join(value.root, 'src', '.config');
+  await mkdir(application, { recursive: true });
+  await writeFile(join(application, 'config.json'), '{invalid');
+  await writeFile(join(value.environment, 'config.json'), '{"valid":true}');
+
+  await assert.rejects(
+    () => resolveConfigJson(value.options),
+    (error: unknown) => error instanceof ConfigError && error.code === 'CONFIGURATION_JSON_INVALID',
+  );
+});
+
+test('supports a custom JSON path while retaining relative-path protection', async () => {
+  const value = await fixture();
+  const application = join(value.root, 'src', '.config');
+  await mkdir(join(application, 'settings'), { recursive: true });
+  await writeFile(join(application, 'settings', 'config.json'), '{"custom":true}');
+
+  const result = await resolveConfigJson({ ...value.options, environment: {}, relativePath: 'settings/config.json' });
+
+  assert.deepEqual(result.value, { custom: true });
+  await assert.rejects(
+    () => resolveConfigJson({ ...value.options, relativePath: '../config.json' }),
+    (error: unknown) => error instanceof ConfigError && error.code === 'CONFIGURATION_PATH_INVALID',
+  );
+});
+
+test('does not allow JSON prototype keys to mutate object prototypes during layering', async () => {
+  const value = await fixture();
+  const application = join(value.root, 'src', '.config');
+  await mkdir(application, { recursive: true });
+  await writeFile(join(application, 'config.json'), '{"__proto__":{"polluted":true},"constructor":{"safe":true}}');
+
+  const result = await resolveConfigJson({ ...value.options, environment: {} });
+
+  assert.equal((Object.prototype as { polluted?: boolean }).polluted, undefined);
+  assert.deepEqual(result.value['__proto__'], { polluted: true });
+  assert.deepEqual(result.value.constructor, { safe: true });
 });
 
 test('requires an environment override to be an absolute existing directory', async () => {

@@ -32,7 +32,13 @@ Configuration roots are resolved in precedence order:
 $<environment-variable>/
 ```
 
-Later roots override earlier roots by relative file path. The environment root is
-optional; when the selected environment variable is set, it must be an absolute
-directory that exists. Relative file requests reject absolute paths, `..`
-traversal, and symlink escapes. Resolved files retain their source provenance.
+Later roots override earlier roots by relative file path. Use `resolveConfigJson`
+to load one JSON object from the same relative path in every root and layer the
+objects from application to home to environment precedence. Nested objects merge
+recursively; scalar values, arrays, and `null` replace earlier values. At least
+one JSON layer must exist, and every layer must have an object root.
+
+The environment root is optional; when the selected environment variable is set,
+it must be an absolute directory that exists. Relative file requests reject
+absolute paths, `..` traversal, and symlink escapes. Resolved files and JSON
+layers retain their source provenance.

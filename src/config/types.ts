@@ -1,5 +1,11 @@
 export type ConfigSource = 'application' | 'home' | 'environment';
 
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
+export interface JsonObject {
+  readonly [key: string]: JsonValue;
+}
+
 export interface ConfigResolutionOptions {
   /** Absolute source directory containing the application .config directory. */
   readonly applicationSourceDirectory: string;
@@ -17,6 +23,11 @@ export interface ConfigResolutionOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
 }
 
+export interface ConfigJsonOptions extends ConfigResolutionOptions {
+  /** Relative JSON file path layered across all resolved configuration roots. */
+  readonly relativePath?: string;
+}
+
 export interface ConfigRoot {
   readonly source: ConfigSource;
   readonly directory: string;
@@ -28,6 +39,16 @@ export interface ResolvedConfigFile {
   readonly absolutePath: string;
   readonly source: ConfigSource;
   readonly sourceDirectory: string;
+}
+
+export interface ResolvedConfigJsonLayer extends ResolvedConfigFile {
+  readonly value: JsonObject;
+}
+
+export interface ResolvedConfigJson {
+  readonly relativePath: string;
+  readonly value: JsonObject;
+  readonly layers: readonly ResolvedConfigJsonLayer[];
 }
 
 export interface ConfigResolution {
